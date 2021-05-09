@@ -133,6 +133,14 @@ const Game = {
 
   applyRevealAction: context => R.assoc('revealer', context.target, context),
 
+  applySteal: R.curry((amount, context) => {
+    const toSteal = Math.min(amount, R.view(Player.lens(context.target), context).cash);
+    return R.pipe(
+      R.over(Player.lens(context.target), Player.adjustCash(-toSteal)),
+      R.over(activePlayerLens, Player.adjustCash(toSteal))
+    )(context);
+  }),
+
   playerHasCash: (idx, cash) => R.pipe(
     R.view(Player.lens(idx)),
     R.propEq('cash', cash)
@@ -163,7 +171,9 @@ Game.applyAction = R.cond([
   [Game.actionEq('income'), R.over(activePlayerLens, Player.adjustCash(1))],
   [Game.actionEq('foreign-aid'), R.over(activePlayerLens, Player.adjustCash(2))],
   [Game.actionEq('tax'), R.over(activePlayerLens, Player.adjustCash(3))],
-  [Game.actionEq('assassinate'), Game.applyRevealAction]
+  [Game.actionEq('assassinate'), Game.applyRevealAction],
+  [Game.actionEq('steal'), Game.applySteal(2)],
+  [Game.actionEq('coup'), Game.applyRevealAction]
 ]);
 
 class GameDef {
@@ -447,7 +457,7 @@ const GameMachine = Machine({
     WaitForResponse: {
       entry: setCurrentAction,
       always: [
-        {target: 'FinishAction', cond: ifActionHasNoResponse},
+        {target: 'FinishAction', cond: ifActionHasNoResponse, actions: payActionCost},
       ],
       on: {
         BLOCK: {target: 'Block', cond: assertCanBlock, actions: payActionCost},

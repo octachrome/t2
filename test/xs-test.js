@@ -276,99 +276,230 @@ describe('State machine', () => {
       assertThrows(() => GameMachine.transition(game0, { type: 'ACTION', action: 'assassinate', player: 0, target: 1 }));
     });
 
-    describe('assassinate', () => {
-      let game3;
+    it('can steal', () => {
+      const game1 = GameMachine.transition(game0, { type: 'ACTION', action: 'steal', player: 0, target: 1 });
+      assertState(game1, 'WaitForResponse');
 
-      beforeEach(() => {
-        // Get some cash
-        const game1 = GameMachine.transition(game0, { type: 'ACTION', action: 'income', player: 0 });
-        const game2 = GameMachine.transition(game1, { type: 'ACTION', action: 'income', player: 1 });
-        game3 = GameMachine.transition(game2, { type: 'ACTION', action: 'income', player: 0 });
+      const game2 = GameMachine.transition(game1, { type: 'ALLOW', player: 1 });
+      assertState(game2, 'StartOfTurn');
+      assertContext(game2, [
+        turnEq(1),
+        Game.playerHasCash(0, 4),
+        Game.playerHasCash(1, 0)
+      ]);
+    });
+  });
+
+  describe('with 1 cash', () => {
+    let game0;
+
+    beforeEach(() => {
+      const initialContext = sampleGame(Rand.makeSeed(123), {
+        whoseTurn: 0,
+
+        players: [
+          {
+            cash: 2,
+            influence: [
+              { role: 'duke', revealed: false },
+              { role: 'captain', revealed: false }
+            ]
+          },
+          {
+            cash: 1,
+            influence: [
+              { role: 'assassin', revealed: false },
+              { role: 'duke', revealed: false }
+            ]
+          }
+        ]
       });
 
-      it('can assassinate', () => {
-        const game4 = GameMachine.transition(game3, { type: 'ACTION', action: 'assassinate', player: 1, target: 0 });
-        assertState(game4, 'WaitForResponse');
-        assertContext(game4, [
-          Game.playerHasCash(1, 3)
-        ]);
+      game0 = GameMachine.withContext(initialContext).initialState;
+    });
 
-        // Allow the assassination
-        const game5 = GameMachine.transition(game4, { type: 'ALLOW', player: 0 });
-        assertState(game5, 'RevealOnAction');
-        assertContext(game5, [
-          Game.playerHasCash(1, 0)
-        ]);
+    it('can steal', () => {
+      const game1 = GameMachine.transition(game0, { type: 'ACTION', action: 'steal', player: 0, target: 1 });
+      assertState(game1, 'WaitForResponse');
 
-        const game6 = GameMachine.transition(game5, { type: 'REVEAL', role: 'captain', player: 0 });
-        assertState(game6, 'StartOfTurn');
-        assertContext(game6, [
-          turnEq(0),
-          Game.playerHasNInf(0, 1),
-          R.complement(Game.playerHasRole(0, 'captain'))
-        ]);
+      const game2 = GameMachine.transition(game1, { type: 'ALLOW', player: 1 });
+      assertState(game2, 'StartOfTurn');
+      assertContext(game2, [
+        turnEq(1),
+        Game.playerHasCash(0, 3),
+        Game.playerHasCash(1, 0)
+      ]);
+    });
+  });
+
+  describe('with 7 cash', () => {
+    let game0;
+
+    beforeEach(() => {
+      const initialContext = sampleGame(Rand.makeSeed(123), {
+        whoseTurn: 0,
+
+        players: [
+          {
+            cash: 7,
+            influence: [
+              { role: 'duke', revealed: false },
+              { role: 'captain', revealed: false }
+            ]
+          },
+          {
+            cash: 1,
+            influence: [
+              { role: 'assassin', revealed: false },
+              { role: 'duke', revealed: false }
+            ]
+          }
+        ]
       });
 
-      it('can lose by being correctly challenged on a contessa block', () => {
-        const game4 = GameMachine.transition(game3, { type: 'ACTION', action: 'assassinate', player: 1, target: 0 });
-        assertState(game4, 'WaitForResponse');
+      game0 = GameMachine.withContext(initialContext).initialState;
+    });
 
-        // Block the assassination
-        assertThrows(() => GameMachine.transition(game4, { type: 'BLOCK', role: 'duke', player: 0 }));
-        const game5 = GameMachine.transition(game4, { type: 'BLOCK', role: 'contessa', player: 0 });
-        assertState(game5, 'Block');
-        assertContext(game5, [
-          Game.playerHasCash(1, 0)
-        ]);
+    it('can coup', () => {
+      const game1 = GameMachine.transition(game0, { type: 'ACTION', action: 'coup', player: 0, target: 1 });
+      assertState(game1, 'RevealOnAction');
 
-        // Challenge the block
-        const game6 = GameMachine.transition(game5, { type: 'CHALLENGE', player: 1 });
-        assertState(game6, 'Challenge');
+      const game2 = GameMachine.transition(game1, { type: 'REVEAL', role: 'duke', player: 1 });
+      assertState(game2, 'StartOfTurn');
+      assertContext(game2, [
+        turnEq(1),
+        Game.playerHasCash(0, 0),
+        Game.playerHasNInf(1, 1)
+      ]);
+    });
+  });
 
-        const game7 = GameMachine.transition(game6, { type: 'REVEAL', role: 'captain', player: 0 });
-        assertState(game7, 'GameOver');
+  describe('with 3 cash', () => {
+    let game0;
+
+    beforeEach(() => {
+      const initialContext = sampleGame(Rand.makeSeed(123), {
+        whoseTurn: 1,
+
+        players: [
+          {
+            cash: 2,
+            influence: [
+              { role: 'duke', revealed: false },
+              { role: 'captain', revealed: false }
+            ]
+          },
+          {
+            cash: 3,
+            influence: [
+              { role: 'assassin', revealed: false },
+              { role: 'duke', revealed: false }
+            ]
+          }
+        ]
       });
 
-      it('no payment for correctly challenged assassination', () => {
-        const game4 = GameMachine.transition(game3, { type: 'ACTION', action: 'assassinate', player: 1, target: 0 });
-        assertState(game4, 'WaitForResponse');
+      game0 = GameMachine.withContext(initialContext).initialState;
+    });
 
-        const game5 = GameMachine.transition(game4, { type: 'CHALLENGE', player: 0 });
-        assertState(game5, 'Challenge');
-        assertContext(game5, [
-          Game.playerHasCash(1, 3)
-        ]);
+    it('can assassinate', () => {
+      const game1 = GameMachine.transition(game0, { type: 'ACTION', action: 'assassinate', player: 1, target: 0 });
+      assertState(game1, 'WaitForResponse');
+      assertContext(game1, [
+        Game.playerHasCash(1, 3)
+      ]);
 
-        const game6 = GameMachine.transition(game5, { type: 'REVEAL', role: 'duke', player: 1 });
-        assertState(game6, 'StartOfTurn');
-        assertContext(game6, [
-          turnEq(0),
-          Game.playerHasNInf(1, 1),
-          R.complement(Game.playerHasRole(1, 'duke')),
-          Game.playerHasCash(1, 3)
-        ]);
-      });
+      // Allow the assassination
+      const game2 = GameMachine.transition(game1, { type: 'ALLOW', player: 0 });
+      assertState(game2, 'RevealOnAction');
+      assertContext(game2, [
+        Game.playerHasCash(1, 0)
+      ]);
 
-      it('last chance to block after incorrectly challenging an assassination', () => {
-        const game4 = GameMachine.transition(game3, { type: 'ACTION', action: 'assassinate', player: 1, target: 0 });
-        assertState(game4, 'WaitForResponse');
+      const game3 = GameMachine.transition(game2, { type: 'REVEAL', role: 'captain', player: 0 });
+      assertState(game3, 'StartOfTurn');
+      assertContext(game3, [
+        turnEq(0),
+        Game.playerHasNInf(0, 1),
+        R.complement(Game.playerHasRole(0, 'captain'))
+      ]);
+    });
 
-        // Lose an influence by incorrectly challenging
-        const game5 = GameMachine.transition(game4, { type: 'CHALLENGE', player: 0 });
-        assertState(game5, 'Challenge');
+    it('can lose by being correctly challenged on a contessa block', () => {
+      const game1 = GameMachine.transition(game0, { type: 'ACTION', action: 'assassinate', player: 1, target: 0 });
+      assertState(game1, 'WaitForResponse');
 
-        const game6 = GameMachine.transition(game5, { type: 'REVEAL', role: 'assassin', player: 1 });
-        assertState(game6, 'ChallengeIncorrect');
+      // Block the assassination
+      assertThrows(() => GameMachine.transition(game1, { type: 'BLOCK', role: 'duke', player: 0 }));
+      const game2 = GameMachine.transition(game1, { type: 'BLOCK', role: 'contessa', player: 0 });
+      assertState(game2, 'Block');
+      assertContext(game2, [
+        Game.playerHasCash(1, 0)
+      ]);
 
-        const game7 = GameMachine.transition(game6, { type: 'REVEAL', role: 'captain', player: 0 });
-        assertState(game7, 'WaitForBlock');
-        assertContext(game7, [
-          Game.playerHasCash(1, 0)
-        ]);
+      // Challenge the block
+      const game3 = GameMachine.transition(game2, { type: 'CHALLENGE', player: 1 });
+      assertState(game3, 'Challenge');
 
-        const game8 = GameMachine.transition(game7, { type: 'BLOCK', role: 'contessa', player: 0 });
-        assertState(game8, 'Block');
-      });
+      const game4 = GameMachine.transition(game3, { type: 'REVEAL', role: 'captain', player: 0 });
+      assertState(game4, 'GameOver');
+    });
+
+    it('no payment for correctly challenged assassination', () => {
+      const game1 = GameMachine.transition(game0, { type: 'ACTION', action: 'assassinate', player: 1, target: 0 });
+      assertState(game1, 'WaitForResponse');
+
+      const game2 = GameMachine.transition(game1, { type: 'CHALLENGE', player: 0 });
+      assertState(game2, 'Challenge');
+      assertContext(game2, [
+        Game.playerHasCash(1, 3)
+      ]);
+
+      const game3 = GameMachine.transition(game2, { type: 'REVEAL', role: 'duke', player: 1 });
+      assertState(game3, 'StartOfTurn');
+      assertContext(game3, [
+        turnEq(0),
+        Game.playerHasNInf(1, 1),
+        R.complement(Game.playerHasRole(1, 'duke')),
+        Game.playerHasCash(1, 3)
+      ]);
+    });
+
+    it('last chance to block after incorrectly challenging an assassination', () => {
+      const game1 = GameMachine.transition(game0, { type: 'ACTION', action: 'assassinate', player: 1, target: 0 });
+      assertState(game1, 'WaitForResponse');
+
+      // Lose an influence by incorrectly challenging
+      const game2 = GameMachine.transition(game1, { type: 'CHALLENGE', player: 0 });
+      assertState(game2, 'Challenge');
+
+      const game3 = GameMachine.transition(game2, { type: 'REVEAL', role: 'assassin', player: 1 });
+      assertState(game3, 'ChallengeIncorrect');
+
+      const game4 = GameMachine.transition(game3, { type: 'REVEAL', role: 'captain', player: 0 });
+      assertState(game4, 'WaitForBlock');
+      assertContext(game4, [
+        Game.playerHasCash(1, 0)
+      ]);
+
+      const game5 = GameMachine.transition(game4, { type: 'BLOCK', role: 'contessa', player: 0 });
+      assertState(game5, 'Block');
+    });
+
+    it('can steal', () => {
+      const game1 = GameMachine.transition(game0, { type: 'ACTION', action: 'income', player: 1 });
+      assertState(game1, 'StartOfTurn');
+
+      const game2 = GameMachine.transition(game1, { type: 'ACTION', action: 'steal', player: 0, target: 1 });
+      assertState(game2, 'WaitForResponse');
+
+      const game3 = GameMachine.transition(game2, { type: 'ALLOW', player: 1 });
+      assertState(game3, 'StartOfTurn');
+      assertContext(game3, [
+        turnEq(1),
+        Game.playerHasCash(0, 4),
+        Game.playerHasCash(1, 2)
+      ]);
     });
   });
 
