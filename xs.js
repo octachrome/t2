@@ -1,11 +1,9 @@
 const util = require('util');
 const R = require('ramda');
 const pureRandom = require('pure-random');
-const {rights} = require('sanctuary');
-const {Machine, assign, pure} = require('xstate');
+const {Machine, assign} = require('xstate');
 const State = require('crocks/State');
 const Pair = require('crocks/Pair');
-const { countReset } = require('console');
 
 ///// Utilities
 
@@ -16,6 +14,8 @@ const logRet = fn => (...args) => {
   console.log(fn.name, ret);
   return ret;
 }
+
+const debug = fn => assign(context => (fn(context), context));
 
 const UINT32_MAX = Math.pow(2, 32) - 1;
 const PRIMES = [160481183, 179424673, 198491317, 217645177];
@@ -44,15 +44,6 @@ const activePlayerLens = (() => {
   return R.lens(getter, setter);
 })();
 
-const playerLens = idx => {
-  // Context -> Player
-  const getter = context => context.players[idx];
-  // Context -> Player -> Context
-  const setter = (player, context) => R.evolve({players: R.update(idx, player)}, context);
-
-  return R.lens(getter, setter);
-};
-
 const processing = lens => m => State.get().chain(s0 => {
   const [res, s1] = m.runWith(R.view(lens, s0)).toArray();
   return State.put(R.set(lens, s1, s0)).map(() => res);
@@ -63,7 +54,7 @@ const liftRand = processing(R.lensProp('seed'));
 // Lifts a deck function to act on a game context
 const liftDeck = processing(R.lensProp('deck'));
 // Lifts a player function to act on a game context
-const liftPlayer = R.uncurryN(2, idx => processing(playerLens(idx)));
+const liftPlayer = R.uncurryN(2, idx => processing(Player.lens(idx)));
 
 const Player = {
   // Player -> Number
@@ -101,7 +92,16 @@ const Player = {
     const idx = R.findIndex(R.equals({role: oldRole, revealed: false}), player.influence);
     if (idx == -1) raiseError(`Player does not have role ${oldRole}`);
     return State.put(R.evolve({influence: R.adjust(idx, R.assoc('role', newRole))}, player));
-  })
+  }),
+
+  lens: idx => {
+    // Context -> Player
+    const getter = context => context.players[idx];
+    // Context -> Player -> Context
+    const setter = (player, context) => R.evolve({players: R.update(idx, player)}, context);
+  
+    return R.lens(getter, setter);
+  }
 };
 
 ///// Game
@@ -131,7 +131,32 @@ const Game = {
   turnEq: R.propEq('whoseTurn'),
   actionEq: R.propEq('currentAction'),
 
-  applyRevealAction: context => R.assoc('revealer', context.target, context)
+  applyRevealAction: context => R.assoc('revealer', context.target, context),
+
+  playerHasCash: (idx, cash) => R.pipe(
+    R.view(Player.lens(idx)),
+    R.propEq('cash', cash)
+  ),
+
+  playerCanAffordAction: R.curry((idx, action, context) => {
+    const cost = context.def.getCost(action);
+    const cash = R.view(Player.lens(idx), context).cash;
+    return cost <= cash;
+  }),
+
+  playerHasNInf: (idx, n) => R.pipe(
+    R.view(Player.lens(idx)),
+    Player.hasNInf(n)
+  ),
+
+  // Number -> String -> Context -> Boolean
+  playerHasRole: R.uncurryN(3, (idx, role) => R.pipe(
+    R.view(Player.lens(idx)),
+    R.prop('influence'),
+    R.any(R.both(
+      R.propEq('revealed', false),
+      R.propEq('role', role)))
+  ))
 };
 
 Game.applyAction = R.cond([
@@ -150,16 +175,13 @@ class GameDef {
         targeted: true
       },
       'income': {
-        cost: 0,
         gain: 1
       },
       'foreign-aid': {
-        cost: 0,
         gain: 2,
         blockedBy: 'duke'
       },
       'tax': {
-        cost: 0,
         gain: 3,
         roles: 'duke'
       },
@@ -170,17 +192,14 @@ class GameDef {
         blockedBy: 'contessa'
       },
       'steal': {
-        cost: 0,
         roles: 'captain',
         targeted: true,
         blockedBy: ['captain', 'ambassador', 'inquisitor']
       },
       'exchange': {
-        cost: 0,
         roles: ['ambassador', 'inquisitor']
       },
       'interrogate': {
-        cost: 0,
         roles: 'inquisitor',
         targeted: true
       }
@@ -223,6 +242,10 @@ class GameDef {
     return this.actions[action].targeted;
   }
 
+  getCost(action) {
+    return this.actions[action].cost || 0;
+  }
+
   makeDeck() {
     return R.flatten(this.roles.map(el => R.repeat(el, 3)));
   }
@@ -238,15 +261,6 @@ const redealPlayerRole = R.curry(
     () => Game.shuffleDeck_s()).chain(
       () => Game.popDeck_s()).chain(
         newRole => liftPlayer(idx, Player.swapRole_s(oldRole, newRole))).execWith(context));
-
-// Number -> String -> Context -> Boolean
-const playerHasRole = R.uncurryN(3, (idx, role) => R.pipe(
-  R.view(playerLens(idx)),
-  R.prop('influence'),
-  R.any(R.both(
-    R.propEq('revealed', false),
-    R.propEq('role', role)))
-));
 
 // todo: check player is alive
 const isValidPlayerIdx = (context, idx) => typeof idx === 'number' && idx >= 0 && idx < context.players.length;
@@ -274,6 +288,9 @@ const assertCanStartAction = (context, event, meta) => {
       throw new Error(`${event.type} event cannot target player ${event.target}`);
     }
   }
+  if (!Game.playerCanAffordAction(event.player, event.action, context)) {
+    throw new Error(`Player ${event.player} cannot afford action ${event.action}`);
+  }
   return true;
 };
 
@@ -285,7 +302,7 @@ const assertCanReveal = (context, event, meta) => {
   if (!('role' in event) || !context.def.isValidRole(event.role)) {
     throw new Error(`${event.type} event must specify a valid role`);
   }
-  if (!playerHasRole(event.player, event.role, context)) {
+  if (!Game.playerHasRole(event.player, event.role, context)) {
     throw new Error(`${event.type} event must specify a role that is held by the player and not yet revealed`);
   }
   return true;
@@ -335,20 +352,22 @@ const assertCanBlock = (context, event, meta) => {
   return true;
 };
 
-const ifActionHasResponse = (context, event, meta) =>
+const ifActionHasResponse = context =>
   context.def.isRoleRequired(context.currentAction) || context.def.isBlockable(context.currentAction);
 
 const ifActionHasNoResponse = (context, event, meta) => !ifActionHasResponse(context, event, meta);
 
-const ifChallengeIncorrect = (context, event, meta) =>
+const ifChallengeIncorrect = context =>
   context.blocker != null ? context.def.isBlockedBy(context.currentAction, context.revealedRole) :
   context.def.ifRoleAllowsAction(context.revealedRole, context.currentAction);
 
 const ifPendingReveal = context => context.revealer != null && context.revealedRole == null;
 
+const ifBlockableAction = context => context.def.isBlockable(context.currentAction);
+
 const ifActionWasBlocked = context => context.blocker != null;
 
-const ifAutoReveal = context => playerHasNInf(context.revealer, 1)(context);
+const ifAutoReveal = context => Game.playerHasNInf(context.revealer, 1)(context);
 
 const allConds = (...conds) => (context, event, meta) => R.all(cond => cond(context, event, meta), conds);
 
@@ -385,19 +404,22 @@ const applyAction = assign(Game.applyAction);
 const revealInfluence = assign((context, event) => {
   // For auto-reveal there is no event; we reveal the player's only role.
   let role = event.role || R.pipe(
-    R.view(playerLens(context.revealer)),
+    R.view(Player.lens(context.revealer)),
     Player.getFirstRole
   )(context);
   return R.pipe(
-    R.over(playerLens(context.revealer), Player.revealRole(role)),
+    R.over(Player.lens(context.revealer), Player.revealRole(role)),
     R.assoc('revealedRole', role)
   )(context)
 });
 
-const replaceInfluence = assign((context, event) => R.pipe(
-  R.over(playerLens(context.revealer), Player.unrevealRole(context.revealedRole)),
+const replaceInfluence = assign(context => R.pipe(
+  R.over(Player.lens(context.revealer), Player.unrevealRole(context.revealedRole)),
   redealPlayerRole(context.revealer, context.revealedRole)
 )(context));
+
+const payActionCost = assign(context => 
+  R.over(activePlayerLens, Player.adjustCash(-context.def.getCost(context.currentAction)), context));
 
 const resetContext = assign({
   currentAction: null,
@@ -408,9 +430,7 @@ const resetContext = assign({
   revealedRole: null
 });
 
-const debug = fn => assign(context => (fn(context), context));
-
-const gameMachine = Machine({
+const GameMachine = Machine({
   id: 'game',
   strict: true,
 
@@ -430,9 +450,9 @@ const gameMachine = Machine({
         {target: 'FinishAction', cond: ifActionHasNoResponse},
       ],
       on: {
-        BLOCK: {target: 'Block', cond: assertCanBlock},
+        BLOCK: {target: 'Block', cond: assertCanBlock, actions: payActionCost},
         CHALLENGE: {target: 'Challenge', cond: assertCanChallenge},
-        ALLOW: {target: 'FinishAction', cond: assertValidOpponent}
+        ALLOW: {target: 'FinishAction', cond: assertValidOpponent, actions: payActionCost}
       }
     },
 
@@ -473,19 +493,34 @@ const gameMachine = Machine({
         replaceInfluence,
         setRevealer(context => context.challenger)
       ],
+      always: {target: 'ExecCounterReveal', cond: ifAutoReveal},
+      on: {
+        REVEAL: {target: 'ExecCounterReveal', cond: assertCanReveal}
+      }
+    },
+
+    // After an incorrect challenge, the challenger must reveal
+    ExecCounterReveal: {
+      entry: revealInfluence,
       always: [
         // If a block was incorrectly challenged, the block succeeds
-        {target: 'EndOfTurn', cond: allConds(ifAutoReveal, ifActionWasBlocked), actions: revealInfluence},
+        {target: 'EndOfTurn', cond: ifActionWasBlocked},
+        // Otherwise, an action was incorrectly challenged. If the action is blockable, check if the opponent wants to block
+        {target: 'WaitForBlock', cond: ifBlockableAction},
         // Otherwise, an action was incorrectly challenged, so the action succeeds
-        {target: 'FinishAction', cond: ifAutoReveal, actions: revealInfluence}
+        {target: 'FinishAction'}
+      ]
+    },
+
+    // Occurs after an action has been unsuccessfully challenged, when there is still a last chance to block
+    WaitForBlock: {
+      entry: [
+        clearRevealer,
+        payActionCost
       ],
       on: {
-        REVEAL: [
-          // If a block was incorrectly challenged, the block succeeds
-          {target: 'EndOfTurn', cond: allConds(assertCanReveal, ifActionWasBlocked), actions: revealInfluence},
-          // Otherwise, an action was incorrectly challenged, so the action succeeds
-          {target: 'FinishAction', cond: assertCanReveal, actions: revealInfluence}
-        ]
+        BLOCK: {target: 'Block', cond: assertCanBlock},
+        ALLOW: {target: 'FinishAction', cond: assertValidOpponent}
       }
     },
 
@@ -519,298 +554,4 @@ const gameMachine = Machine({
   }
 });
 
-const inspectState = state => util.inspect(R.pick(['value', 'changed', 'context'], state), false, null, true);
-
-const logState = state => console.log(inspectState(state));
-
-const assertContext = (state, preds) => R.allPass(R.flatten([preds])) (state.context) || raiseError(`Failed to assert context on ${inspectState(state)}`);
-
-const assertState = (state, id) => state.value == id || raiseError(`Expected state ${id} but was ${inspectState(state)}`);
-
-assertThrows = fn => {
-  let threw = false;
-  try {
-    fn();
-  } catch (ignored) {
-    threw = true;
-  }
-  if (!threw) {
-    raiseError('Expected an exception to be thrown');
-  }
-};
-
-const arrayHash = hashFn => R.reduce((acc, el) => acc + 23 * hashFn(el), 17);
-const intArrayHash = arrayHash(R.identity);
-const stringHash = R.pipe(
-  R.split(''),
-  R.map(char => char.codePointAt(0)),
-  intArrayHash);
-const stringArrayHash = arrayHash(stringHash);
-const deckHash = R.pipe(R.path(['context', 'deck']), stringArrayHash);
-
-const turnEq = R.propEq('whoseTurn');
-const actionEq = R.propEq('currentAction');
-
-const playerHasCash = (idx, cash) => R.pipe(
-  R.view(playerLens(idx)),
-  R.propEq('cash', cash)
-);
-
-const playerHasNInf = (idx, n) => R.pipe(
-  R.view(playerLens(idx)),
-  Player.hasNInf(n)
-);
-
-const sampleGame = (seed, context) => {
-  const def = new GameDef();
-  const deck = def.makeDeck();
-  return Game.shuffleDeck_s().execWith(R.mergeLeft(context, {def, seed, deck}))
-};
-
-const initialContext = sampleGame(Rand.makeSeed(123), {
-  whoseTurn: 0,
-
-  players: [
-    {
-      cash: 2,
-      influence: [
-        {role: 'duke', revealed: false},
-        {role: 'captain', revealed: false}
-      ]
-    },
-    {
-      cash: 2,
-      influence: [
-        {role: 'assassin', revealed: false},
-        {role: 'duke', revealed: false}
-      ]
-    }
-  ]
-});
-
-const game0 = gameMachine.withContext(initialContext).initialState;
-assertState(game0, 'StartOfTurn');
-assertContext(game0, [
-  turnEq(0),
-  actionEq(null),
-  playerHasCash(0, 2),
-  playerHasCash(1, 2)
-]);
-
-const game1 = gameMachine.transition(game0, {type: 'ACTION', action: 'income', player: 0});
-assertState(game1, 'StartOfTurn');
-assertContext(game1, [
-  turnEq(1),
-  actionEq(null),
-  playerHasCash(0, 3),
-  playerHasCash(1, 2)
-]);
-
-const game2 = gameMachine.transition(game1, {type: 'ACTION', action: 'tax', player: 1});
-assertState(game2, 'WaitForResponse');
-assertContext(game2, [
-  turnEq(1),
-  actionEq('tax')
-]);
-
-const game3 = gameMachine.transition(game2, {type: 'ALLOW', player: 0});
-assertState(game3, 'StartOfTurn');
-assertContext(game3, [
-  turnEq(0),
-  playerHasCash(1, 5)
-]);
-
-const game3a = gameMachine.transition(game2, {type: 'CHALLENGE', player: 0});
-assertState(game3a, 'Challenge');
-assertContext(game3a, [
-  turnEq(1),
-  R.propEq('revealer', 1)
-]);
-
-// Lose the challenge by revealing a role which is not duke
-const game3a_1 = gameMachine.transition(game3a, {type: 'REVEAL', role: 'assassin', player: 1});
-assertState(game3a_1, 'StartOfTurn');
-assertContext(game3a_1, [
-  turnEq(0),
-  playerHasNInf(1, 1),        // Player lost an influence
-  playerHasCash(1, 2),        // Player did not draw tax
-  R.complement(playerHasRole(1, 'assassin'))
-]);
-
-// Win the challenge by revealing a duke
-const game3a_1a = gameMachine.transition(game3a, {type: 'REVEAL', role: 'duke', player: 1});
-assertState(game3a_1a, 'ChallengeIncorrect');
-assertContext(game3a_1a, [
-  turnEq(1),
-  R.propEq('revealer', 0),
-  playerHasNInf(1, 2),                      // Player replaced their duke with a new role from the deck
-  R.complement(playerHasRole(1, 'duke')),
-]);
-if (deckHash(game3a_1a) === deckHash(game3a)) raiseError("Expected deck to be shuffled");
-
-// Now the challenger must reveal
-const game3a_1a_2 = gameMachine.transition(game3a_1a, {type: 'REVEAL', role: 'duke', player: 0});
-assertState(game3a_1a_2, 'StartOfTurn');
-assertContext(game3a_1a_2, [
-  turnEq(0),
-  playerHasNInf(0, 1),
-  R.complement(playerHasRole(0, 'duke')),   // Challenger lost their duke
-  playerHasCash(1, 5)                       // Player drew tax
-]);
-
-// Play foreign aid instead of tax
-const game4 = gameMachine.transition(game3, {type: 'ACTION', action: 'foreign-aid', player: 0});
-assertState(game4, 'WaitForResponse');
-assertContext(game4, [
-  turnEq(0),
-  actionEq('foreign-aid')
-]);
-
-// Block foreign aid with duke
-const game5 = gameMachine.transition(game4, {type: 'BLOCK', role: 'duke', player: 1});
-assertState(game5, 'Block');
-assertContext(game5, [
-  turnEq(0),
-  actionEq('foreign-aid')
-]);
-
-// Allow the block
-const game6 = gameMachine.transition(game5, {type: 'ALLOW', player: 0});
-assertState(game6, 'StartOfTurn');
-assertContext(game6, [
-  turnEq(1),
-  playerHasCash(0, 3)   // Foreign aid was blocked
-]);
-
-// Challenge the block
-const game6a = gameMachine.transition(game5, {type: 'CHALLENGE', player: 0});
-assertState(game6a, 'Challenge');
-assertContext(game6a, [
-  turnEq(0),
-  R.propEq('revealer', 1),
-]);
-
-// Win the challenge by revealing a duke, blocking foreign aid
-const game6a_1 = gameMachine.transition(game6a, {type: 'REVEAL', role: 'duke', player: 1});
-assertState(game6a_1, 'ChallengeIncorrect');
-assertContext(game6a_1, [
-  turnEq(0),
-  R.propEq('revealer', 0),
-  playerHasNInf(1, 2),                      // Player replaced their duke with a new role from the deck
-  R.complement(playerHasRole(1, 'duke')),
-]);
-if (deckHash(game6a_1) === deckHash(game6a)) raiseError("Expected deck to be shuffled");
-
-// Now the challenger must reveal
-const game6a_2 = gameMachine.transition(game6a_1, {type: 'REVEAL', role: 'duke', player: 0});
-assertState(game6a_2, 'StartOfTurn');
-assertContext(game6a_2, [
-  turnEq(1),
-  playerHasNInf(0, 1),                      // Player lost their duke
-  playerHasCash(0, 3)                       // Player did not draw foreign aid
-]);
-
-// Lose the challenge by revealing a role other than duke
-const game6a_1a = gameMachine.transition(game6a, {type: 'REVEAL', role: 'assassin', player: 1});
-assertState(game6a_1a, 'StartOfTurn');
-assertContext(game6a_1a, [
-  turnEq(1),
-  playerHasNInf(1, 1),                      // Challenger lost their assassin
-  R.complement(playerHasRole(1, 'assassin')),
-  playerHasCash(0, 5)                       // Player drew foreign aid
-]);
-
-const game7 = gameMachine.transition(game6, {type: 'ACTION', action: 'assassinate', player: 1, target: 0});
-assertState(game7, 'WaitForResponse');
-
-assertThrows(() => gameMachine.transition(game7, {type: 'BLOCK', role: 'duke', player: 0}));
-
-// Allow the assassination
-const game8 = gameMachine.transition(game7, {type: 'ALLOW', player: 0});
-assertState(game8, 'RevealOnAction');
-
-const game9 = gameMachine.transition(game8, {type: 'REVEAL', role: 'captain', player: 0});
-assertState(game9, 'StartOfTurn');
-assertContext(game9, [
-  turnEq(0),
-  playerHasNInf(0, 1),
-  R.complement(playerHasRole(0, 'captain'))
-]);
-
-// Block the assassination
-const game8a = gameMachine.transition(game7, {type: 'BLOCK', role: 'contessa', player: 0});
-assertState(game8a, 'Block');
-
-// Challenge the block
-const game8a_1 = gameMachine.transition(game8a, {type: 'CHALLENGE', player: 1});
-assertState(game8a_1, 'Challenge');
-
-const game8a_2 = gameMachine.transition(game8a_1, {type: 'REVEAL', role: 'captain', player: 0});
-assertState(game8a_2, 'GameOver');
-
-const game10 = gameMachine.transition(game9, {type: 'ACTION', action: 'assassinate', target: 1, player: 0});
-assertState(game10, 'WaitForResponse');
-
-// Lose our last influence by being correctly challenged
-const game11a = gameMachine.transition(game10, {type: 'CHALLENGE', player: 1});
-assertState(game11a, 'GameOver');
-
-const game11b = gameMachine.transition(game10, {type: 'BLOCK', role: 'contessa', player: 1});
-assertState(game11b, 'Block');
-
-const game11b_1 = gameMachine.transition(game11b, {type: 'ALLOW', player: 0});
-assertState(game11b_1, 'StartOfTurn');
-assertContext(game11b_1, [
-  turnEq(1),
-  playerHasNInf(1, 2)
-]);
-
-const game11b_2 = gameMachine.transition(game11b_1, {type: 'ACTION', action: 'tax', player: 1});
-assertState(game11b_2, 'WaitForResponse');
-
-// Lose our last influence by incorrectly challenging
-const game11b_3 = gameMachine.transition(game11b_2, {type: 'CHALLENGE', player: 0});
-assertState(game11b_3, 'Challenge');
-
-const game11b_4 = gameMachine.transition(game11b_3, {type: 'REVEAL', role: 'duke', player: 1});
-assertState(game11b_4, 'GameOver');
-
-
-const initialContext2 = sampleGame(Rand.makeSeed(123), {
-  whoseTurn: 1,
-
-  players: [
-    {
-      cash: 2,
-      influence: [
-        {role: 'duke', revealed: false},
-        {role: 'contessa', revealed: false}
-      ]
-    },
-    {
-      cash: 2,
-      influence: [
-        {role: 'assassin', revealed: false},
-        {role: 'duke', revealed: true}
-      ]
-    }
-  ]
-});
-
-const game0a = gameMachine.withContext(initialContext2).initialState;
-assertState(game0a, 'StartOfTurn');
-
-// Lose our last influence by incorrectly challenging a block
-const game0a_1 = gameMachine.transition(game0a, {type: 'ACTION', action: 'assassinate', target: 0, player: 1});
-assertState(game0a_1, 'WaitForResponse');
-
-const game0a_2 = gameMachine.transition(game0a_1, {type: 'BLOCK', role: 'contessa', player: 0});
-assertState(game0a_2, 'Block');
-
-const game0a_3 = gameMachine.transition(game0a_2, {type: 'CHALLENGE', player: 1});
-assertState(game0a_3, 'Challenge');
-
-const game0a_4 = gameMachine.transition(game0a_3, {type: 'REVEAL', role: 'contessa', player: 0});
-assertState(game0a_4, 'GameOver');
-
-console.log('Pass');
+module.exports = {Rand, GameDef, Game, Player, GameMachine};
